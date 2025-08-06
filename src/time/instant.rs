@@ -527,6 +527,36 @@ impl Instant {
         raw += microleapseconds(raw) - ls;
         Self { raw }
     }
+
+    /// Return the UTC year and fractional day of year (DOY)
+    ///
+    /// # Returns
+    /// A tuple `(year, fractional_doy)` where `fractional_doy` is the
+    /// day of year (1-based) including the fraction of the day as a float.
+    ///
+    /// # Example
+    /// ```
+    /// // 2023-03-01T12:00:00 UTC is the 60th day of 2023 (non-leap year)
+    /// let instant = satkit::Instant::from_datetime(2023, 3, 1, 12, 0, 0.0);
+    /// let (year, doy) = instant.utc_frac_year_day().unwrap();
+    /// assert_eq!(year, 2023);
+    /// assert!((doy - 60.5).abs() < 1e-9); // 60 full days + 0.5 day for 12h
+    /// ```
+    pub fn utc_frac_year_day(&self) -> Result<(i32, f64), anyhow::Error> {
+        let (year, month, day, hour, minute, second) = self.as_datetime();
+
+        // Calculate day of year (DOY), 1-based
+        let doy = {
+            use chrono::{Datelike, NaiveDate};
+            let date = NaiveDate::from_ymd_opt(year, month as u32, day as u32)
+                .ok_or_else(|| anyhow::anyhow!("Invalid date"))?;
+            date.ordinal()
+        };
+
+        let frac_day = (hour as f64 + minute as f64 / 60.0 + second / 3600.0) / 24.0;
+
+        Ok((year, doy as f64 + frac_day))
+    }
 }
 
 impl std::fmt::Display for Instant {
