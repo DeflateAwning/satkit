@@ -546,6 +546,105 @@ impl TLE {
             self.rev_num,
         )
     }
+
+    pub fn to_tle_2lines(&self) -> Result<Vec<String>> {
+        let sat_num_alpha5 = Self::int_to_alpha5(self.sat_num)?;
+
+        let desig_year = if self.desig_year < 100 {
+            format!("{:02}", self.desig_year)
+        } else {
+            format!("{:02}", self.desig_year % 100)
+        };
+
+        let intl_desig = format!(
+            "{:<8}",
+            format!("{}{:03}{}", desig_year, self.desig_launch, self.desig_piece)
+        );
+
+        let epoch_day = self.epoch.utc_frac_year_day()?; // returns (year, doy + fraction)
+        let epoch_str = format!(
+            "{:02}{:012.8}",
+            epoch_day.0 % 100,
+            epoch_day.1 // day of year including fractional part
+        );
+
+        let mean_motion_dot = format!("{:+.8}", self.mean_motion_dot * 2.0);
+        let mean_motion_dot_fmt = &mean_motion_dot[1..]; // drop sign for fixed-width format
+        let mean_motion_dot_sign = if self.mean_motion_dot * 2.0 >= 0.0 {
+            ' '
+        } else {
+            '-'
+        };
+
+        let mean_motion_dot_dot = format!("{:+.5e}", self.mean_motion_dot_dot * 6.0);
+        let (dot_dot_base, dot_dot_exp) = mean_motion_dot_dot
+            .trim_start_matches('+')
+            .split_once('e')
+            .unwrap_or(("0.00000", "0"));
+        let dot_dot_str = format!("{}{}", &dot_dot_base[2..], format!("{:0>+3}", dot_dot_exp));
+
+        let bstar_str = format!("{:+.5e}", self.bstar);
+        let (bstar_base, bstar_exp) = bstar_str
+            .trim_start_matches('+')
+            .split_once('e')
+            .unwrap_or(("0.00000", "0"));
+        let bstar_val = format!("{}{}", &bstar_base[2..], format!("{:0>+3}", bstar_exp));
+
+        let line1_no_checksum = format!(
+            "1 {:<5}U {}{}{}.{} {} {} 0 {:>4}",
+            sat_num_alpha5,
+            intl_desig,
+            epoch_str,
+            mean_motion_dot_sign,
+            mean_motion_dot_fmt,
+            dot_dot_str,
+            bstar_val,
+            self.element_num
+        );
+
+        let inclination = format!("{:8.4}", self.inclination);
+        let raan = format!("{:8.4}", self.raan);
+        let ecc = format!("{:07}", (self.eccen * 1.0e7).round() as i32);
+        let arg_per = format!("{:8.4}", self.arg_of_perigee);
+        let mean_anomaly = format!("{:8.4}", self.mean_anomaly);
+        let mean_motion = format!("{:11.8}", self.mean_motion);
+        let rev_num = format!("{:5}", self.rev_num);
+
+        let line2_no_checksum = format!(
+            "2 {:<5}{}{}{}{}{}{}{}",
+            sat_num_alpha5, inclination, raan, ecc, arg_per, mean_anomaly, mean_motion, rev_num
+        );
+
+        let line1 = format!(
+            "{}{}",
+            line1_no_checksum,
+            Self::compute_checksum(&line1_no_checksum)
+        );
+        let line2 = format!(
+            "{}{}",
+            line2_no_checksum,
+            Self::compute_checksum(&line2_no_checksum)
+        );
+
+        let mut lines = vec![line1, line2];
+        if !self.name.trim().is_empty() && self.name != "none" {
+            lines.insert(0, format!("0 {}", self.name));
+        }
+
+        Ok(lines)
+    }
+
+    fn compute_checksum(line: &str) -> u8 {
+        let mut sum = 0u8;
+        for c in line.chars().take(68) {
+            sum += match c {
+                '0'..='9' => c as u8 - b'0',
+                '-' => 1,
+                _ => 0,
+            };
+        }
+        sum % 10
+    }
 }
 
 impl Default for TLE {
@@ -747,6 +846,88 @@ mod tests {
             Ok(ref s) => bail!("Error converting 269994 to 'S9994': got {}", s),
             Err(e) => bail!("Error converting 269994 to 'S9994': {}", e),
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_round_trip_to_tle_2lines() -> Result<()> {
+        let line0 = "0 ISS (ZARYA)";
+        let line1 = "1 Z9999U 98067A   24356.58519896  .00014389  00000-0  25222-3 0  9992";
+        let line2 = "2 Z9999  51.6403 106.8969 0007877   6.1421 113.2479 15.50801739487615";
+
+        let original = TLE::load_3line(line0, line1, line2)?;
+        let serialized_lines = original.to_tle_2lines()?;
+
+        // Ensure lines have correct length and formatting
+        assert!(
+            serialized_lines.len() == 3,
+            "Expected 3 lines including name, got {}",
+            serialized_lines.len()
+        );
+        assert!(
+            serialized_lines[1] == line1,
+            "Line 1 must match: \"{}\"",
+            serialized_lines[1]
+        );
+        assert!(
+            serialized_lines[2] == line2,
+            "Line 2 must match: \"{}\"",
+            serialized_lines[2]
+        );
+
+        // Parse serialized lines back into a TLE
+        let reparsed = TLE::load_3line(
+            &serialized_lines[0],
+            &serialized_lines[1],
+            &serialized_lines[2],
+        )?;
+
+        // Allow a small epsilon for floating-point fields
+        let epsilon = 1e-10;
+        macro_rules! assert_approx_eq {
+            ($a:expr, $b:expr, $field:literal) => {
+                assert!(
+                    ($a - $b).abs() < epsilon,
+                    "Mismatch on {}: {} vs {}",
+                    $field,
+                    $a,
+                    $b
+                );
+            };
+        }
+
+        assert_eq!(original.name, reparsed.name);
+        assert_eq!(original.sat_num, reparsed.sat_num);
+        assert_eq!(original.intl_desig, reparsed.intl_desig);
+        assert_eq!(original.desig_year, reparsed.desig_year);
+        assert_eq!(original.desig_launch, reparsed.desig_launch);
+        assert_eq!(original.desig_piece, reparsed.desig_piece);
+        assert_eq!(original.epoch, reparsed.epoch);
+        assert_approx_eq!(
+            original.mean_motion_dot,
+            reparsed.mean_motion_dot,
+            "mean_motion_dot"
+        );
+        assert_approx_eq!(
+            original.mean_motion_dot_dot,
+            reparsed.mean_motion_dot_dot,
+            "mean_motion_dot_dot"
+        );
+        assert_approx_eq!(original.bstar, reparsed.bstar, "bstar");
+        assert_eq!(original.ephem_type, reparsed.ephem_type);
+        assert_eq!(original.element_num, reparsed.element_num);
+        assert_approx_eq!(original.inclination, reparsed.inclination, "inclination");
+        assert_approx_eq!(original.raan, reparsed.raan, "raan");
+        assert_approx_eq!(original.eccen, reparsed.eccen, "eccen");
+        assert_approx_eq!(
+            original.arg_of_perigee,
+            reparsed.arg_of_perigee,
+            "arg_of_perigee"
+        );
+        assert_approx_eq!(original.mean_anomaly, reparsed.mean_anomaly, "mean_anomaly");
+        assert_approx_eq!(original.mean_motion, reparsed.mean_motion, "mean_motion");
+        assert_eq!(original.rev_num, reparsed.rev_num);
 
         Ok(())
     }
